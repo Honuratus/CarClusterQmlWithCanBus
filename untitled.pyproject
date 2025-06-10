@@ -1,0 +1,10 @@
+{
+    "files": [
+        "Debug.qml",
+        "Road.qml",
+        "com/reciever.py",
+        "com/writer.py",
+        "main.py",
+        "main.qml"
+    ]
+}
