@@ -182,10 +182,9 @@ class CANWriter(QObject):
             return None
 
     def handle_gamepad_event(self, event):
-        """Process gamepad events and update pressed_keys set"""
         key_name = None
         value = event.state
-        
+
         if event.code == "BTN_BASE2":  # A button (Xbox), Cross (PS)
             key_name = 'Button_A'
         elif event.code == "BTN_BASE":  # B button (Xbox), Circle (PS)
@@ -200,7 +199,6 @@ class CANWriter(QObject):
             elif value == 1:
                 key_name = 'Hat_Right'
             else:
-                # Centered - remove directional keys
                 self.pressed_keys.discard('Hat_Left')
                 self.pressed_keys.discard('Hat_Right')
                 return
@@ -210,19 +208,19 @@ class CANWriter(QObject):
             elif value == 1:
                 key_name = 'Hat_Down'
             else:
-                # Centered - remove directional keys
                 self.pressed_keys.discard('Hat_Up')
                 self.pressed_keys.discard('Hat_Down')
                 return
         else:
-            print(event.code)
+            print(event.code, value)
             return
 
         if key_name:
-            if value != 0:
+            if value == 1:  # Sadece basılma eventini ekle
                 self.pressed_keys.add(key_name)
-            else:
+            elif value == 0:  # Bırakılma eventini sil
                 self.pressed_keys.discard(key_name)
+
 
     def send_loop(self):
         while self.running:
