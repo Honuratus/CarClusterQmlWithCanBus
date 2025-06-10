@@ -164,96 +164,120 @@ class CANReceiverThread(QThread):
     def run(self):
         self.receiver.start_receiving()
 
-# === CAN WRITER === #
 class CANWriter(QObject):
     def __init__(self, serial_connection):
         super().__init__()
         self.serial_connection = serial_connection
         self.can_protocol = CANProtocol()
-        self.pressed_keys = set()
         self.lock = QMutex()
         self.running = True
-
-    def create_can_packet(self, frame_id, data_bytes, extended_frame=False, remote_frame=False):
-        try:
-            return self.can_protocol.pack_can_frame(frame_id, data_bytes, extended_frame, remote_frame)
-        except ValueError as e:
-            print(f"Paket oluşturulurken hata: {e}")
-            return None
+        
+        # Gamepad state tracking
+        self.current_state = {
+            'BTN_BASE2': 0,  # A button
+            'BTN_BASE': 0,   # B button
+            'BTN_WEST': 0,   # X button
+            'BTN_NORTH': 0,  # Y button
+            'ABS_HAT0X': 0,  # D-pad X axis
+            'ABS_HAT0Y': 0,  # D-pad Y axis
+            'ABS_Z': 0,      # Left trigger (Gaz)
+            'ABS_RZ': 0      # Right trigger (Fren)
+        }
+        
+        # Debounce tracking
+        self.last_event_time = 0
+        self.debounce_delay = 0.1  # 100ms
+        self.last_send_time = 0
+        self.send_interval = 0.05  # 50ms
 
     def handle_gamepad_event(self, event):
-        key_name = None
-        value = event.state
-
-        if event.code == "BTN_BASE2":  # A button (Xbox), Cross (PS)
-            key_name = 'Button_A'
-        elif event.code == "BTN_BASE":  # B button (Xbox), Circle (PS)
-            key_name = 'Button_B'
-        elif event.code == "BTN_WEST":  # X button (Xbox), Square (PS)
-            key_name = 'Button_X'
-        elif event.code == "BTN_NORTH":  # Y button (Xbox), Triangle (PS)
-            key_name = 'Button_Y'
-        elif event.code == "ABS_HAT0X":
-            if value == -1:
-                key_name = 'Hat_Left'
-            elif value == 1:
-                key_name = 'Hat_Right'
-            else:
-                self.pressed_keys.discard('Hat_Left')
-                self.pressed_keys.discard('Hat_Right')
-                return
-        elif event.code == "ABS_HAT0Y":
-            if value == -1:
-                key_name = 'Hat_Up'
-            elif value == 1:
-                key_name = 'Hat_Down'
-            else:
-                self.pressed_keys.discard('Hat_Up')
-                self.pressed_keys.discard('Hat_Down')
-                return
-        else:
-            print(event.code, value)
+        current_time = time.time()
+        
+        # Trigger butonları için özel işleme
+        if event.code in ['ABS_Z', 'ABS_RZ']:
+            # Trigger değerlerini normalize et (0-255 arası)
+            value = max(0, min(255, int((event.state + 32768) / 256)))
+            self.current_state[event.code] = value
+            self.last_event_time = current_time
             return
+            
+        if current_time - self.last_event_time < self.debounce_delay:
+            return
+            
+        if event.code in self.current_state and self.current_state[event.code] != event.state:
+            self.current_state[event.code] = event.state
+            self.last_event_time = current_time
+            
+            if event.code == "ABS_HAT0X":
+                self.process_dpad_x(event.state)
+            elif event.code == "ABS_HAT0Y":
+                self.process_dpad_y(event.state)
+            else:
+                self.process_button(event.code, event.state)
 
-        if key_name:
-            if value == 1:  # Sadece basılma eventini ekle
-                self.pressed_keys.add(key_name)
-            elif value == 0:  # Bırakılma eventini sil
-                self.pressed_keys.discard(key_name)
+    def process_dpad_x(self, state):
+        self.current_state['ABS_HAT0X'] = state
+        if state == -1:  # Left
+            self.send_can_command(132, (8).to_bytes(1, 'big'))
+        elif state == 1:  # Right
+            self.send_can_command(133, (7).to_bytes(1, 'big'))
 
+    def process_dpad_y(self, state):
+        self.current_state['ABS_HAT0Y'] = state
+        if state == -1:  # Up
+            self.send_can_command(134, (6).to_bytes(1, 'big'))
+        elif state == 1:  # Down
+            self.send_can_command(135, (5).to_bytes(1, 'big'))
+    
+    def process_button(self, button_code, state):
+        if button_code in ['BTN_BASE2', 'BTN_BASE', 'BTN_WEST', 'BTN_NORTH']:
+            if state == 1:  # Button pressed
+                if button_code == "BTN_BASE2":  # A
+                    self.send_can_command(130, (10).to_bytes(1, 'big'))
+                elif button_code == "BTN_BASE":  # B
+                    self.send_can_command(131, (9).to_bytes(1, 'big'))
+                elif button_code == "BTN_WEST":  # X
+                    self.send_can_command(136, (4).to_bytes(1, 'big'))
+                elif button_code == "BTN_NORTH":  # Y
+                    self.send_can_command(137, (3).to_bytes(1, 'big'))
+            elif state == 0:  # Button released
+                # Send a "release" command or stop sending for this button
+                self.send_can_command(140, (0).to_bytes(1, 'big'))  # Example release command
 
     def send_loop(self):
         while self.running:
-            self.lock.lock()
-            if self.serial_connection and self.serial_connection.is_open:
-                for key_name in list(self.pressed_keys):
-                    if key_name == 'Button_A':
-                        data = (10).to_bytes(1, 'big')
-                        id = 130
-                    elif key_name == 'Button_B':
-                        data = (9).to_bytes(1, 'big')
-                        id = 131
-                    elif key_name == 'Hat_Left':
-                        data = (8).to_bytes(1, 'big')
-                        id = 132
-                    elif key_name == 'Hat_Right':
-                        data = (7).to_bytes(1, 'big')
-                        id = 133
-                    elif key_name == 'Hat_Down':
-                        data = (6).to_bytes(1, 'big')
-                        id = 134
-                    else:
-                        continue
+            current_time = time.time()
+            if current_time - self.last_send_time >= self.send_interval:
+                self.lock.lock()
+                try:
+                    # Trigger (gaz/fren) değerlerini sürekli gönder
+                    if self.current_state['ABS_Z'] > 10:  # Gaz (Left trigger)
+                        value = self.current_state['ABS_Z']
+                        self.send_can_command(138, value.to_bytes(1, 'big'))
+                        
+                    if self.current_state['ABS_RZ'] > 10:  # Fren (Right trigger)
+                        value = self.current_state['ABS_RZ']
+                        self.send_can_command(139, value.to_bytes(1, 'big'))
+                        
+                    # Diğer buton durumlarını kontrol et
+                    for btn, state in self.current_state.items():
+                        if btn in ['BTN_BASE2', 'BTN_BASE', 'BTN_WEST', 'BTN_NORTH'] and state == 1:
+                            self.process_button(btn, state)
+                            
+                finally:
+                    self.lock.unlock()
+                    self.last_send_time = current_time
                     
-                    packet = self.create_can_packet(id, data)
-                    if packet:
-                        try:
-                            self.serial_connection.write(packet)
-                            print(f"Gönderildi: {key_name} -> {packet.hex()}")
-                        except serial.SerialException as e:
-                            print(f"Seri porta yazılırken hata: {e}")
-            self.lock.unlock()
-            time.sleep(0.1)
+            time.sleep(0.01)  # Daha hassas kontrol
+
+    def send_can_command(self, frame_id, data):
+        try:
+            packet = self.can_protocol.pack_can_frame(frame_id, data)
+            if packet and self.serial_connection and self.serial_connection.is_open:
+                self.serial_connection.write(packet)
+                print(f"Sent: {frame_id} -> {packet.hex()}")
+        except Exception as e:
+            print(f"Error sending CAN command: {e}")
 
     def stop(self):
         self.running = False
@@ -263,14 +287,25 @@ class GamepadThread(QThread):
         super().__init__()
         self.can_writer = can_writer
         self.running = True
+        self.gamepad = None
+        
+        # Gamepad bağlantısını kontrol et
+        if not devices.gamepads:
+            print("No gamepad found!")
+        else:
+            self.gamepad = devices.gamepads[0]
+            print(f"Gamepad found: {self.gamepad}")
 
     def run(self):
-        print("Gamepad thread started. Looking for gamepad...")
+        print("Gamepad thread started")
         while self.running:
             try:
-                events = get_gamepad()
-                for event in events:
-                    self.can_writer.handle_gamepad_event(event)
+                if self.gamepad:
+                    events = self.gamepad.read()
+                    for event in events:
+                        self.can_writer.handle_gamepad_event(event)
+                else:
+                    time.sleep(1)  # Gamepad yoksa bekle
             except Exception as e:
                 print(f"Gamepad error: {e}")
                 time.sleep(1)
@@ -281,7 +316,7 @@ class GamepadThread(QThread):
 def main():
     # Seri portu aç
     try:
-        ser = serial.Serial('/dev/ttyUSB0', 2000000, timeout=1)
+        ser = serial.Serial('/dev/ttyUSB1', 2000000, timeout=1)
         print("Seri port açıldı.")
     except serial.SerialException as e:
         print(f"Seri port açılamadı: {e}")
