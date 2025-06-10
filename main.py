@@ -1,11 +1,13 @@
 import serial
 import threading
 import time
-from pyjoystick.sdl2 import run_event_loop
+from inputs import get_gamepad, devices
 
-from PySide6.QtCore import QObject, Signal, QThread
+from PySide6.QtCore import QObject, Signal, QThread, QTimer, QMutex
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
+
+import os
 
 # === CAN PROTOCOL === #
 class CANProtocol:
@@ -41,7 +43,6 @@ class CANProtocol:
 
         return bytes(packed_frame)
 
-
 # === CAN RECEIVER === #
 class CANReceiver(QObject):
     canDistanceDataReceived = Signal(int, int, str)  # frame_id, length, data_hex
@@ -67,7 +68,6 @@ class CANReceiver(QObject):
             frame_type = (type_byte >> 5) & 0x01
             data_length = type_byte & 0x0F
 
-            # Debug için
             if frame_type == 0:  # Standard frame
                 if len(packet) < 4 + data_length + 1:
                     raise ValueError("Standard frame için paket tam değil")
@@ -97,25 +97,19 @@ class CANReceiver(QObject):
 
         while self.running:
             try:
-                # Seri porttan veri oku
                 if self.serial_connection.in_waiting > 0:
                     new_data = self.serial_connection.read(self.serial_connection.in_waiting)
                     self.buffer.extend(new_data)
 
-
-                    # Paketleri işle
                     while True:
-                        # Paket başlığını ara (0xAA)
                         header_pos = self.buffer.find(0xAA)
                         if header_pos == -1:
                             self.buffer.clear()
                             break
 
-                        # Buffer'ı başlığa hizala
                         if header_pos > 0:
                             self.buffer = self.buffer[header_pos:]
 
-                        # En azından type byte'ını kontrol et
                         if len(self.buffer) < 2:
                             break
 
@@ -123,7 +117,6 @@ class CANReceiver(QObject):
                         data_length = type_byte & 0x0F
                         frame_type = (type_byte >> 5) & 0x01
 
-                        # Beklenen minimum paket uzunluğu
                         min_len = 6 + data_length + 1 if frame_type else 4 + data_length + 1
                         if len(self.buffer) < min_len:
                             break
@@ -131,7 +124,6 @@ class CANReceiver(QObject):
                         try:
                             frame_id, length, data = self.parse_can_packet(self.buffer[:min_len])
 
-                            # ID'leri integer olarak karşılaştır
                             if frame_id == 0x2301:
                                 self.canDistanceDataReceived.emit(frame_id, length, data.hex())
                             elif frame_id == 0x2601:
@@ -147,12 +139,10 @@ class CANReceiver(QObject):
                             else:
                                 print(f"Bilinmeyen ID: {hex(frame_id)}")
 
-                            # İşlenen paketi buffer'dan çıkar
                             self.buffer = self.buffer[min_len:]
 
                         except Exception as e:
                             print(f"Paket işleme hatası: {e}")
-                            # Hatalı paketi atla (1 byte ilerle)
                             if len(self.buffer) > 1:
                                 self.buffer = self.buffer[1:]
                             else:
@@ -166,7 +156,6 @@ class CANReceiver(QObject):
     def stop_receiving(self):
         self.running = False
 
-
 class CANReceiverThread(QThread):
     def __init__(self, receiver):
         super().__init__()
@@ -175,14 +164,15 @@ class CANReceiverThread(QThread):
     def run(self):
         self.receiver.start_receiving()
 
-
 # === CAN WRITER === #
-class CANWriter:
+class CANWriter(QObject):
     def __init__(self, serial_connection):
+        super().__init__()
         self.serial_connection = serial_connection
         self.can_protocol = CANProtocol()
         self.pressed_keys = set()
-        self.lock = threading.Lock()  # seri porta erişim için kilit
+        self.lock = QMutex()
+        self.running = True
 
     def create_can_packet(self, frame_id, data_bytes, extended_frame=False, remote_frame=False):
         try:
@@ -191,68 +181,115 @@ class CANWriter:
             print(f"Paket oluşturulurken hata: {e}")
             return None
 
-    def key_received(self, key):
-        # key burada pyjoystick event objesi
-        name = key  # Örnek: 'Button 6'
-        value = key.value
-
-
-        if name not in ['Button 6', 'Button 7', 'Hat 0 [Left]', 'Hat 0 [Right]', 'Hat 0 [Centered]', 'Hat 0 [Down]']:
+    def handle_gamepad_event(self, event):
+        """Process gamepad events and update pressed_keys set"""
+        key_name = None
+        value = event.state
+        
+        if event.code == "BTN_BASE2":  # A button (Xbox), Cross (PS)
+            key_name = 'Button_A'
+        elif event.code == "BTN_BASE":  # B button (Xbox), Circle (PS)
+            key_name = 'Button_B'
+        elif event.code == "BTN_WEST":  # X button (Xbox), Square (PS)
+            key_name = 'Button_X'
+        elif event.code == "BTN_NORTH":  # Y button (Xbox), Triangle (PS)
+            key_name = 'Button_Y'
+        elif event.code == "ABS_HAT0X":
+            if value == -1:
+                key_name = 'Hat_Left'
+            elif value == 1:
+                key_name = 'Hat_Right'
+            else:
+                # Centered - remove directional keys
+                self.pressed_keys.discard('Hat_Left')
+                self.pressed_keys.discard('Hat_Right')
+                return
+        elif event.code == "ABS_HAT0Y":
+            if value == -1:
+                key_name = 'Hat_Up'
+            elif value == 1:
+                key_name = 'Hat_Down'
+            else:
+                # Centered - remove directional keys
+                self.pressed_keys.discard('Hat_Up')
+                self.pressed_keys.discard('Hat_Down')
+                return
+        else:
+            print(event.code)
             return
 
-        if value != 0:
-            self.pressed_keys.add(name)
-        else:
-            self.pressed_keys.discard(name)
+        if key_name:
+            if value != 0:
+                self.pressed_keys.add(key_name)
+            else:
+                self.pressed_keys.discard(key_name)
 
     def send_loop(self):
-        while True:
-            with self.lock:
-                if self.serial_connection and self.serial_connection.is_open:
-                    for key_name in list(self.pressed_keys):
-                        if key_name == 'Button 7':
-                            data = (10).to_bytes(1, 'big')
-                            id = 130
-                        elif key_name == 'Button 6':
-                            data = (9).to_bytes(1, 'big')
-                            id = 131
-                        elif key_name == 'Hat 0 [Left]':
-                            data = (8).to_bytes(1,'big')
-                            id = 132
-                            self.pressed_keys.discard(key_name)  # bir kere gönder, sonra sil
-                        elif key_name == 'Hat 0 [Right]':
-                            data = (7).to_bytes(1,'big');
-                            id = 133
-                            self.pressed_keys.discard(key_name)  # bir kere gönder, sonra sil
-                        elif key_name == 'Hat 0 [Down]':
-                            data = (6).to_bytes(1,'big')
-                            id = 134
-                            self.pressed_keys.discard(key_name)
-                        else:
-                            continue
-                        packet = self.create_can_packet(id, data)
-                        if packet:
-                            try:
-                                self.serial_connection.write(packet)
-                                print(f"Gönderildi: {key_name} -> {packet.hex()}")
-                            except serial.SerialException as e:
-                                print(f"Seri porta yazılırken hata: {e}")
-
+        while self.running:
+            self.lock.lock()
+            if self.serial_connection and self.serial_connection.is_open:
+                for key_name in list(self.pressed_keys):
+                    if key_name == 'Button_A':
+                        data = (10).to_bytes(1, 'big')
+                        id = 130
+                    elif key_name == 'Button_B':
+                        data = (9).to_bytes(1, 'big')
+                        id = 131
+                    elif key_name == 'Hat_Left':
+                        data = (8).to_bytes(1, 'big')
+                        id = 132
+                    elif key_name == 'Hat_Right':
+                        data = (7).to_bytes(1, 'big')
+                        id = 133
+                    elif key_name == 'Hat_Down':
+                        data = (6).to_bytes(1, 'big')
+                        id = 134
+                    else:
+                        continue
+                    
+                    packet = self.create_can_packet(id, data)
+                    if packet:
+                        try:
+                            self.serial_connection.write(packet)
+                            print(f"Gönderildi: {key_name} -> {packet.hex()}")
+                        except serial.SerialException as e:
+                            print(f"Seri porta yazılırken hata: {e}")
+            self.lock.unlock()
             time.sleep(0.1)
 
+    def stop(self):
+        self.running = False
 
+class GamepadThread(QThread):
+    def __init__(self, can_writer):
+        super().__init__()
+        self.can_writer = can_writer
+        self.running = True
 
+    def run(self):
+        print("Gamepad thread started. Looking for gamepad...")
+        while self.running:
+            try:
+                events = get_gamepad()
+                for event in events:
+                    self.can_writer.handle_gamepad_event(event)
+            except Exception as e:
+                print(f"Gamepad error: {e}")
+                time.sleep(1)
+
+    def stop(self):
+        self.running = False
 
 def main():
-    # Seri portu sadece bir kere açıyoruz, hem okuyucu hem yazıcı kullanacak
+    # Seri portu aç
     try:
-        ser = serial.Serial('COM6', 2000000, timeout=1)
+        ser = serial.Serial('/dev/ttyUSB0', 2000000, timeout=1)
         print("Seri port açıldı.")
     except serial.SerialException as e:
         print(f"Seri port açılamadı: {e}")
         return
 
-    # PySide uygulaması başlat (isteğe bağlı, GUI için)
+    # PySide uygulaması başlat
     app = QGuiApplication()
 
     # CANReceiver ve thread'i oluştur
@@ -263,41 +300,39 @@ def main():
     # CANWriter oluştur
     can_writer = CANWriter(ser)
 
-    # Joystick event loop'u ayrı thread'de başlat
-    def add_joystick(joy):
-        print(f"Joystick added: {joy}")
-
-    def remove_joystick(joy):
-        print(f"Joystick removed: {joy}")
-
-    def handle_key_event(key):
-        can_writer.key_received(key)
-
-    joystick_thread = threading.Thread(target=run_event_loop, args=(add_joystick, remove_joystick, handle_key_event), daemon=True)
-    joystick_thread.start()
+    # Gamepad thread'i başlat
+    gamepad_thread = GamepadThread(can_writer)
+    gamepad_thread.start()
 
     # CANWriter gönderim döngüsünü thread ile başlat
-    send_thread = threading.Thread(target=can_writer.send_loop, daemon=True)
+    send_thread = threading.Thread(target=can_writer.send_loop)
+    send_thread.daemon = True
     send_thread.start()
 
+    # QML engine setup
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("canReceiver", can_receiver)
-
     engine.load("main.qml")
+    
     if not engine.rootObjects():
         return -1
 
-    try:
-        app.exec()
-    except KeyboardInterrupt:
-        print("Program durduruldu.")
+    # Uygulamayı çalıştır
+    ret = app.exec()
 
     # Kapanış işlemleri
     can_receiver.stop_receiving()
+    can_writer.stop()
+    gamepad_thread.stop()
+    receiver_thread.quit()
+    receiver_thread.wait()
+    gamepad_thread.wait()
+    
     if ser and ser.is_open:
         ser.close()
         print("Seri port kapatıldı.")
 
+    return ret
 
 if __name__ == "__main__":
     main()
