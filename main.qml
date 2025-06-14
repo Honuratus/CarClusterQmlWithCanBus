@@ -24,7 +24,7 @@ Window {
     property color darkSecondTextColor: "#A69BAC"
     property var debugWindow: null
 
-    property int MAX_BUFFER_SIZE: 100
+    property int max_buffer_size: 100
     property int messageLength: 0
 
     FontLoader{
@@ -397,7 +397,7 @@ Window {
                 else{
                     ready.visible = false;
                 }
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
@@ -423,14 +423,14 @@ Window {
                 }
                 else distanceWarning.visible = false;
                 distanceText.text = (rawValue < 0) ? 0 : rawValue
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
             function onCanTempDataReceived(frameId, length, dataHex){
                 var rawValue = parseInt(dataHex, 16) / 10
                 tempText.text = rawValue + "°C"
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
@@ -439,7 +439,7 @@ Window {
                 console.log("selamunaleykum")
                 var rawValue = parseInt(dataHex, 16);
                 road.leftSignalOpen = rawValue
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
@@ -447,7 +447,7 @@ Window {
                 console.log("selamunaleykum")
                 var rawValue = parseInt(dataHex, 16);
                 road.rightSignalOpen = rawValue
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
@@ -460,7 +460,7 @@ Window {
                 else{
                     tempAndDateBox.border.color = mainWindow.lightAccent
                 }
-                if (debugWindow && mainWindow.messageLength < MAX_BUFFER_SIZE) {
+                if (debugWindow && mainWindow.messageLength < max_buffer_size) {
                    debugWindow.addCanMessage(frameId, length, dataHex)
                 }
             }
